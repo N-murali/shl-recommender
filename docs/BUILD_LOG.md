@@ -578,7 +578,50 @@ async def chat(request: ChatRequest) -> ChatResponse:
 ---
 
 ## Phase 6 — Tests
-*(To be documented as we build it)*
+
+### Step 6.1: Installed test dependencies
+- Ran: `.\venv\Scripts\pip install pytest pytest-asyncio httpx`
+- Installed: pytest==9.0.3, pytest-asyncio==1.3.0
+
+### Step 6.2: Created tests/__init__.py
+- Empty package file to make tests/ a Python package
+
+### Step 6.3: Created tests/test_api.py (14 tests)
+- **TestHealthEndpoint**: returns 200, correct content-type, POST returns 405
+- **TestChatValidation**: empty body→422, empty messages→422, invalid role→422, empty content→422, missing content→422, too many messages→422
+- **TestChatResponseSchema**: valid request→200, has required fields, reply is string, recommendations is list, end_of_conversation is bool
+- Uses `@patch("agent.call_llm")` to mock LLM calls (fast, free, deterministic)
+
+### Step 6.4: Created tests/test_agent.py (35 tests)
+- **TestDetermineMode** (7): vague→clarify, detailed→recommend, off-topic→refuse, injection→refuse, comparison→compare, empty→clarify, long JD→recommend
+- **TestOffTopicDetection** (6): joke, weather, injection detected; assessment/hiring/shl queries not off-topic
+- **TestComparisonDetection** (4): difference, compare, versus detected; normal query not comparison
+- **TestSufficientContext** (4): single word insufficient; role+competency, role+type, long message sufficient
+- **TestTurnCounting** (3): zero turns, JSON-based counting, turn limit forces end
+- **TestResponseParsing** (5): valid JSON, code block, invalid fallback, cap at 10, invalid recs filtered
+- **TestProvenanceValidation** (6): valid kept, hallucinated name/url filtered, mixed, empty, case-sensitive
+
+### Step 6.5: Created tests/test_retriever.py (19 tests)
+- **TestRetrieverInit** (6): real catalog, small catalog, missing file, invalid JSON, empty catalog, missing field
+- **TestRetrieverSearch** (10): returns results, respects top_k, top_k=1, has score, ordered by score, has required fields, java→java tests, personality→P type, empty query, performance <5s
+- **TestGetAllEntries** (3): returns full catalog, has required fields, small catalog
+
+### Step 6.6: Test results
+```
+tests/test_agent.py     — 35 passed in 18.18s ✓
+tests/test_api.py       — 14 passed in 31.08s ✓
+tests/test_retriever.py — 19 passed in 40.55s ✓
+TOTAL                   — 68 passed ✓
+```
+
+### Phase 6 — Final State
+
+| File | Tests | Purpose |
+|------|-------|---------|
+| tests/__init__.py | - | Package marker |
+| tests/test_api.py | 14 | Endpoint integration tests |
+| tests/test_agent.py | 35 | Agent logic and behavior tests |
+| tests/test_retriever.py | 19 | Retrieval system tests |
 
 ---
 
