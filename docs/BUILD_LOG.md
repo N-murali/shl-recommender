@@ -712,7 +712,54 @@ messages = [{"role": "user", "content": "I need assessments for a senior Java de
 ---
 
 ## Phase 7 — Deployment
-*(To be documented as we build it)*
+
+### Step 7.1: Created render.yaml
+- Web service type, Python runtime, free plan
+- Build command: `pip install -r requirements.txt`
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Health check path: `/health`
+- Environment variables: PORT=10000, GROQ_API_KEY (secret), PYTHON_VERSION=3.11.9
+
+#### Key Code — render.yaml:
+```yaml
+services:
+  - type: web
+    name: shl-recommender
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: GROQ_API_KEY
+        sync: false  # Set manually in Render dashboard
+      - key: PYTHON_VERSION
+        value: 3.11.9
+    plan: free
+    healthCheckPath: /health
+```
+
+### Step 7.2: Updated .gitignore to allow data/catalog.json
+- **Problem**: Render needs catalog.json at runtime but .gitignore excluded `data/*.json`
+- **Fix**: Commented out the exclusion rule so catalog.json is tracked in git
+- **Rationale**: The catalog is generated offline by the scraper. Render doesn't run the scraper — it just needs the pre-scraped data file.
+
+### Step 7.3: Pushed to GitHub
+- Committed: render.yaml, .gitignore update, data/catalog.json
+- Pushed to main branch
+
+### Step 7.4: Render deployment instructions
+- Create account at render.com (connect GitHub)
+- New Web Service → select shl-recommender repo
+- Set GROQ_API_KEY as secret environment variable
+- Deploy (auto-detects render.yaml)
+- Verify: GET /health → {"status": "ok"}
+
+### Key Decisions
+- **catalog.json in git**: Render free tier has no persistent storage. The file must be in the repo.
+- **PYTHON_VERSION=3.11.9**: Pinned to match our target (even though local is 3.14). Render uses this.
+- **healthCheckPath**: Render uses this to know when the service is ready after deploy.
+- **sync: false for GROQ_API_KEY**: Means "set this manually in dashboard" — keeps secrets out of code.
 
 ---
 
