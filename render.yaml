@@ -1,0 +1,33 @@
+# render.yaml — Render deployment configuration for SHL Assessment Recommender
+#
+# What this file does:
+#   Tells Render how to build and run the service. Defines the web service
+#   type, build command, start command, environment variables, and instance type.
+#
+# Why these decisions:
+#   - Free instance type: meets assignment requirements (no cost)
+#   - pip install: installs all dependencies from requirements.txt
+#   - uvicorn with --host 0.0.0.0: required for Render to route traffic
+#   - PORT env var: Render sets this automatically, uvicorn reads it
+#   - GROQ_API_KEY: set manually in Render dashboard (secret, not in code)
+#
+# What breaks if this file is wrong:
+#   - Wrong start command → service won't start → evaluator can't reach it
+#   - Missing env vars → startup fails → 502 errors
+#   - Wrong instance type → deployment rejected or costs money
+
+services:
+  - type: web
+    name: shl-recommender
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: GROQ_API_KEY
+        sync: false  # Set manually in Render dashboard (secret)
+      - key: PYTHON_VERSION
+        value: 3.11.9
+    plan: free
+    healthCheckPath: /health

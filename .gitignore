@@ -16,8 +16,8 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Scraped catalog data (added separately, not auto-committed)
-data/*.json
+# Scraped catalog data (tracked — needed at runtime on Render)
+# data/*.json
 
 # IDE files
 .vscode/
