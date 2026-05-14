@@ -614,6 +614,92 @@ tests/test_retriever.py — 19 passed in 40.55s ✓
 TOTAL                   — 68 passed ✓
 ```
 
+### Step 6.7: Issues encountered and debugging process
+
+#### Issue 1: API tests hanging/timing out (FAILED APPROACH)
+
+**What happened:**
+- First run: `pytest tests/ -v --tb=short` — timed out after 120 seconds
+- Tests were passing individually (dots appearing) but never completing
+- Agent tests (35) passed fine. API tests started but hung.
+
+**Root cause diagnosis:**
+- `TestClient(app)` triggers FastAPI's `@app.on_event("startup")` which loads the retriever (~20s)
+- The original fixture used `scope="function"` (default) — meaning the retriever was being re-initialized for EVERY test
+- 14 API tests × 20s startup = 280s just for initialization
+- Combined with the command output piping (`| Select-Object`), the terminal timed out
+
+**Failed approach 1:** Running all tests together with `-v` flag
+```bash
+.\venv\Scripts\python -m pytest tests/ -v --tb=short
+# Result: Timed out at 120s — too many tests + retriever init per test
+```
+
+**Failed approach 2:** Piping output to get last lines
+```bash
+.\venv\Scripts\python -m pytest tests/ -v --tb=short 2>&1 | Select-Object -Last 40
+# Result: PowerShell piping caused the command to hang indefinitely
+```
+
+**Successful fix:** Changed fixture scope from `function` to `module`
+```python
+# BEFORE (slow — reinitializes retriever for every test):
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
+
+# AFTER (fast — initializes retriever once for all tests in the module):
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app) as c:
+        yield c
+```
+
+**Why this works:** `scope="module"` means the TestClient (and therefore the startup event) runs only ONCE for all 14 tests in test_api.py, not 14 times.
+
+#### Issue 2: Mocked LLM tests triggering real behavior routing (FAILED APPROACH)
+
+**What happened:**
+- Tests with `@patch("agent.call_llm")` were still going through the full agent logic
+- For vague queries like "hello" or "I need an assessment", the agent's `_determine_mode()` returned CLARIFY
+- In CLARIFY mode, the agent calls `call_llm()` with augmented messages
+- The mock was working, but the agent was adding extra messages before calling the mock
+
+**Root cause:**
+- The test messages like `"hello"` and `"I need an assessment"` triggered CLARIFY mode
+- CLARIFY mode doesn't call the retriever, so no retriever-related errors
+- But the mock return value needed to be valid JSON that the agent could parse
+
+**Failed approach:** Using simple messages that trigger CLARIFY
+```python
+# This works but doesn't test the RECOMMEND path:
+messages = [{"role": "user", "content": "I need an assessment"}]
+# Agent routes to CLARIFY → calls mock → returns empty recommendations
+# But we wanted to test that recommendations come through properly
+```
+
+**Successful fix:** Used detailed messages that trigger RECOMMEND mode in schema tests
+```python
+# BEFORE: vague messages that trigger CLARIFY (recommendations always empty)
+messages = [{"role": "user", "content": "hello"}]
+
+# AFTER: detailed messages that trigger RECOMMEND (tests the full path)
+messages = [{"role": "user", "content": "I need assessments for a senior Java developer with problem-solving and communication skills"}]
+```
+
+**Why this matters:** The schema tests need to verify that recommendations CAN be returned. Using vague messages meant recommendations were always [] regardless of the mock, making the test meaningless.
+
+#### Issue 3: Running tests separately vs together
+
+**What we learned:**
+- `pytest tests/test_agent.py` — 35 tests, 18s ✓ (no TestClient, no startup)
+- `pytest tests/test_api.py` — 14 tests, 31s ✓ (one startup, then fast)
+- `pytest tests/test_retriever.py` — 19 tests, 41s ✓ (one startup via module fixture)
+- `pytest tests/` — all 68 tests, would take ~90s total (acceptable)
+
+**Decision:** Run test files separately during development for faster feedback. Run all together for final verification.
+
 ### Phase 6 — Final State
 
 | File | Tests | Purpose |
