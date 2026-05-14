@@ -1,0 +1,41 @@
+# ============================================================
+# SHL Assessment Recommender — Pinned Dependencies
+# ============================================================
+# Versions are pinned for reproducibility on Render deployment.
+# The auto-evaluator needs identical behavior every run.
+# ============================================================
+
+# Runtime: FastAPI + Uvicorn (ASGI server)
+fastapi==0.136.1
+uvicorn==0.47.0
+
+# Validation: Pydantic v2
+pydantic==2.13.4
+
+# LLM Provider: Groq (llama-3.3-70b-versatile)
+# To swap to Anthropic: remove groq, add anthropic==0.25.0
+groq==0.12.0
+
+# Embeddings: sentence-transformers (all-MiniLM-L6-v2)
+sentence-transformers==3.3.1
+
+# Vector Store: FAISS (CPU version for Render free tier)
+faiss-cpu==1.9.0.post1
+
+# Environment variable management
+python-dotenv==1.2.2
+
+# Numerical operations (required by FAISS and sentence-transformers)
+numpy==2.2.6
+
+# Scraper: HTTP requests + HTML parsing
+requests==2.34.1
+beautifulsoup4==4.14.3
+
+# ============================================================
+# Development / Testing (not needed on Render, but included
+# so `pip install -r requirements.txt` sets up everything)
+# ============================================================
+pytest==8.3.5
+pytest-asyncio==0.25.3
+httpx==0.28.1
