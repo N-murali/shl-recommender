@@ -205,38 +205,112 @@ class Retriever:
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
         """
-        Search the catalog for entries most similar to the query.
+        Search the catalog using semantic search + keyword fallback.
+
+        Strategy:
+        1. Try semantic search via HF API (best quality)
+        2. If semantic search fails or returns low-confidence results,
+           supplement with keyword-based search
+        3. Merge and deduplicate results
 
         Args:
             query: Natural language search string.
             top_k: Number of results to return (1-10, default 10).
 
         Returns:
-            List of catalog entry dicts ordered by descending cosine similarity.
+            List of catalog entry dicts ordered by descending relevance.
             Each dict includes all catalog fields plus a 'score' field.
         """
         top_k = max(1, min(top_k, config.MAX_RECOMMENDATIONS, len(self.catalog)))
 
+        # Strategy 1: Semantic search via HF API
+        semantic_results = []
         try:
             query_vector = self._embed_query(query)
+            scores, indices = self.index.search(query_vector, top_k)
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(self.catalog):
+                    continue
+                entry = self.catalog[idx].copy()
+                entry["score"] = float(score)
+                semantic_results.append(entry)
         except RuntimeError as e:
-            # If HF API fails, return empty results (agent will handle gracefully)
-            print(f"  WARNING: Query embedding failed: {e}")
-            return []
+            print(f"  WARNING: Semantic search failed: {e}")
 
-        # Search FAISS index
-        scores, indices = self.index.search(query_vector, top_k)
+        # Strategy 2: Keyword-based fallback search
+        keyword_results = self._keyword_search(query, top_k)
 
-        # Build results list
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self.catalog):
-                continue
-            entry = self.catalog[idx].copy()
-            entry["score"] = float(score)
-            results.append(entry)
+        # Merge: semantic results first, then keyword results that aren't duplicates
+        seen_names = {r["name"] for r in semantic_results}
+        merged = list(semantic_results)
+        for kr in keyword_results:
+            if kr["name"] not in seen_names and len(merged) < top_k:
+                merged.append(kr)
+                seen_names.add(kr["name"])
 
-        return results
+        # If semantic search returned nothing, use keyword results entirely
+        if not semantic_results:
+            return keyword_results[:top_k]
+
+        return merged[:top_k]
+
+    def _keyword_search(self, query: str, top_k: int = 10) -> list[dict]:
+        """
+        Keyword-based fallback search over catalog entries.
+
+        Scores each catalog entry by counting how many query keywords
+        appear in the entry's name + description. Simple but reliable
+        when semantic search fails.
+
+        Args:
+            query: Natural language search string.
+            top_k: Number of results to return.
+
+        Returns:
+            List of catalog entry dicts with 'score' field, ordered by relevance.
+        """
+        # Extract meaningful keywords from query (lowercase, remove short words)
+        query_lower = query.lower()
+        words = query_lower.split()
+        keywords = [w for w in words if len(w) >= 3 and w not in {
+            "the", "and", "for", "with", "that", "this", "are", "was",
+            "have", "has", "had", "been", "will", "would", "could",
+            "should", "need", "want", "looking", "find", "help",
+            "please", "also", "some", "any", "all", "who", "what",
+            "which", "their", "they", "them", "from", "about",
+            "assessment", "assessments", "test", "tests", "hire",
+            "hiring", "candidate", "candidates", "role", "position",
+        }]
+
+        if not keywords:
+            # If no meaningful keywords, use all words >= 3 chars
+            keywords = [w for w in words if len(w) >= 3]
+
+        scored_entries = []
+        for entry in self.catalog:
+            # Build searchable text from entry
+            search_text = (
+                f"{entry.get('name', '')} {entry.get('description', '')} "
+                f"{entry.get('test_type', '')}"
+            ).lower()
+
+            # Score: count keyword matches + bonus for name matches
+            score = 0.0
+            for kw in keywords:
+                if kw in search_text:
+                    score += 1.0
+                # Bonus for keyword appearing in the name (more relevant)
+                if kw in entry.get("name", "").lower():
+                    score += 2.0
+
+            if score > 0:
+                entry_copy = entry.copy()
+                entry_copy["score"] = score / (len(keywords) * 3)  # Normalize to 0-1 range
+                scored_entries.append(entry_copy)
+
+        # Sort by score descending
+        scored_entries.sort(key=lambda x: x["score"], reverse=True)
+        return scored_entries[:top_k]
 
     def get_all_entries(self) -> list[dict]:
         """

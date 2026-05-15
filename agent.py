@@ -169,6 +169,8 @@ def process_conversation(messages: list[dict]) -> dict:
         return _validate_response(result)
 
     except Exception as e:
+        # Log the actual error for debugging
+        print(f"  ERROR in process_conversation: {type(e).__name__}: {e}")
         # Fallback: always return a valid schema-compliant response
         return {
             "reply": "I apologize, but I encountered an issue processing your request. Could you please rephrase your question about SHL assessments?",
@@ -385,6 +387,16 @@ def _has_sufficient_context(messages: list[dict]) -> bool:
         "interpersonal", "teamwork", "attention to detail",
         "critical thinking", "decision making", "planning",
         "java", "python", "sql", "programming", "coding",
+        "excel", "data", "statistics", "mathematical",
+        "writing", "reading", "typing", "administrative",
+        "customer", "sales", "financial", "accounting",
+        "project management", "agile", "scrum",
+        "html", "css", "javascript", "react", "angular",
+        "machine learning", "artificial intelligence",
+        "networking", "security", "cloud", "devops",
+        "mechanical", "electrical", "civil",
+        "verbal ability", "numerical ability", "inductive",
+        "deductive", "spatial", "abstract",
     ]
     if any(kw in user_text for kw in competency_keywords):
         dimensions += 1
@@ -394,6 +406,7 @@ def _has_sufficient_context(messages: list[dict]) -> bool:
         "personality", "cognitive", "ability", "knowledge",
         "simulation", "behavioral", "aptitude", "psychometric",
         "skills test", "coding test", "typing test",
+        "knowledge test", "ability test", "reasoning test",
     ]
     if any(kw in user_text for kw in type_keywords):
         dimensions += 1
@@ -406,6 +419,19 @@ def _has_sufficient_context(messages: list[dict]) -> bool:
     ]
     if any(kw in user_text for kw in seniority_keywords):
         dimensions += 1
+
+    # Specific technology/product names — if user mentions a specific tech,
+    # they know what they want (treat as sufficient context)
+    specific_tech = [
+        "excel", "word", "powerpoint", "outlook", "office",
+        "java", "python", "sql", "javascript", ".net", "c#", "c++",
+        "react", "angular", "node", "ruby", "php", "swift",
+        "aws", "azure", "gcp", "docker", "kubernetes",
+        "salesforce", "sap", "oracle", "tableau", "power bi",
+        "opq", "verify", "shl",
+    ]
+    if any(tech in user_text for tech in specific_tech):
+        dimensions += 1  # Counts as an extra dimension
 
     return dimensions >= 2
 
