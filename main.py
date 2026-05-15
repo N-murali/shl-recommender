@@ -62,11 +62,14 @@ async def startup():
     print("SHL Assessment Recommender — Starting up...")
     print("=" * 50)
 
-    # Step 1: Validate API key
+    # Step 1: Validate API keys
     if not config.GROQ_API_KEY:
         print("FATAL: GROQ_API_KEY not set. Add it to .env or environment variables.")
         sys.exit(1)
-    print(f"  API key: configured (provider={config.LLM_PROVIDER}, model={config.LLM_MODEL})")
+    if not config.HF_API_TOKEN:
+        print("FATAL: HF_API_TOKEN not set. Add it to .env or environment variables.")
+        sys.exit(1)
+    print(f"  API keys: configured (LLM={config.LLM_PROVIDER}, embeddings=HF Inference API)")
 
     # Step 2: Initialize retriever
     print("  Initializing retriever...")

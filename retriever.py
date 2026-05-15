@@ -1,96 +1,82 @@
 """
-retriever.py — FAISS vector store with sentence-transformers embeddings.
+retriever.py — FAISS vector store with pre-computed embeddings + HF API for queries.
 
 What this file does:
-    Loads the scraped SHL catalog from data/catalog.json, generates embeddings
-    for each entry using sentence-transformers (all-MiniLM-L6-v2), builds a
-    FAISS index for cosine similarity search, and provides a search() method
-    that returns the top-k most relevant catalog entries for a given query.
+    Loads pre-computed catalog embeddings from data/embeddings.npy (generated
+    offline by scripts/precompute_embeddings.py), builds a FAISS index, and
+    provides search() that embeds queries via Hugging Face Inference API.
 
 Why these decisions:
-    - all-MiniLM-L6-v2: 384 dimensions, fast on CPU (~14ms per embedding),
-      good semantic quality. Fits in Render free tier's 512MB memory.
-    - FAISS IndexFlatIP: Exact search (no approximation). Catalog is small
-      (~377 entries) so brute force is fast and accurate. Inner product on
-      L2-normalized vectors = cosine similarity.
-    - Text representation: "{name} | {test_type} | {description}" gives the
-      embedding model rich context about what each assessment does.
-    - No index persistence: Rebuilt from scratch at each startup. Avoids
-      stale index issues and the catalog is small enough (~5 seconds to embed).
+    - Pre-computed embeddings: Avoids loading PyTorch + sentence-transformers
+      on the server (~400MB RAM saved). Critical for Render free tier (512MB).
+    - HF Inference API for queries: Same model (all-MiniLM-L6-v2), same vectors,
+      runs on HF's servers. Adds ~200ms latency but saves 400MB RAM.
+    - FAISS IndexFlatIP: Exact search on normalized vectors = cosine similarity.
+      Catalog is small (377 entries) so brute force is fast.
 
 What breaks if this file is wrong:
-    - Wrong embedding model → poor retrieval quality → bad recommendations.
-    - Missing normalization → inner product ≠ cosine similarity → wrong ranking.
-    - Wrong catalog path → FileNotFoundError at startup → service won't start.
-    - Slow embedding → startup exceeds 120 seconds → Render kills the service.
+    - Missing embeddings.npy → FileNotFoundError at startup → service won't start.
+    - HF API down → query embedding fails → search returns empty → no recommendations.
+    - Embeddings/catalog mismatch (different order) → wrong results returned.
 """
 
 import json
-import sys
+import os
 import time
 from typing import Optional
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+import requests
 
 import config
 
 
 class Retriever:
     """
-    Semantic search over the SHL assessment catalog using FAISS + sentence-transformers.
+    Semantic search over the SHL assessment catalog using FAISS + pre-computed embeddings.
 
-    Loads catalog at initialization, generates embeddings, builds FAISS index.
-    Provides search() for top-k retrieval and get_all_entries() for provenance validation.
+    Catalog embeddings are loaded from disk (pre-computed offline).
+    Query embeddings are generated via Hugging Face Inference API.
 
     Attributes:
         catalog: List of catalog entry dicts loaded from JSON.
-        model: SentenceTransformer model instance.
         index: FAISS index for similarity search.
     """
 
-    def __init__(self, catalog_path: Optional[str] = None):
+    def __init__(self, catalog_path: Optional[str] = None, embeddings_path: Optional[str] = None):
         """
-        Initialize the retriever: load catalog, generate embeddings, build FAISS index.
+        Initialize the retriever: load catalog, load embeddings, build FAISS index.
 
         Args:
             catalog_path: Path to catalog JSON file. Defaults to config.CATALOG_PATH.
+            embeddings_path: Path to pre-computed embeddings .npy file. Defaults to config.EMBEDDINGS_PATH.
 
         Raises:
-            FileNotFoundError: If catalog file doesn't exist.
-            ValueError: If catalog JSON is invalid or entries missing required fields.
-            RuntimeError: If embedding model fails to load.
-
-        Side effects:
-            Downloads embedding model on first run (~90MB).
-            Prints initialization timing to stdout.
+            FileNotFoundError: If catalog or embeddings file doesn't exist.
+            ValueError: If catalog JSON is invalid or embeddings shape doesn't match.
         """
         start_time = time.time()
 
-        # Resolve catalog path
         self.catalog_path = catalog_path or config.CATALOG_PATH
+        self.embeddings_path = embeddings_path or config.EMBEDDINGS_PATH
 
         # Step 1: Load catalog
         self.catalog = self._load_catalog()
         print(f"  Retriever: Loaded {len(self.catalog)} catalog entries.")
 
-        # Step 2: Load embedding model
-        try:
-            self.model = SentenceTransformer(config.EMBEDDING_MODEL)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load embedding model '{config.EMBEDDING_MODEL}': {e}"
-            ) from e
-        print(f"  Retriever: Loaded embedding model '{config.EMBEDDING_MODEL}'.")
+        # Step 2: Load pre-computed embeddings
+        self.embeddings = self._load_embeddings()
+        print(f"  Retriever: Loaded embeddings ({self.embeddings.shape[0]} x {self.embeddings.shape[1]}).")
 
-        # Step 3: Generate embeddings for all catalog entries
-        texts = [self._entry_to_text(entry) for entry in self.catalog]
-        embeddings = self.model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-        self.embeddings = np.array(embeddings, dtype=np.float32)
-        print(f"  Retriever: Generated {len(self.embeddings)} embeddings ({self.embeddings.shape[1]} dims).")
+        # Step 3: Validate embeddings match catalog
+        if self.embeddings.shape[0] != len(self.catalog):
+            raise ValueError(
+                f"Embeddings count ({self.embeddings.shape[0]}) doesn't match "
+                f"catalog count ({len(self.catalog)}). Re-run scripts/precompute_embeddings.py"
+            )
 
-        # Step 4: Build FAISS index (IndexFlatIP for cosine similarity on normalized vectors)
+        # Step 4: Build FAISS index
         dimension = self.embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dimension)
         self.index.add(self.embeddings)
@@ -107,11 +93,9 @@ class Retriever:
             List of catalog entry dicts.
 
         Raises:
-            FileNotFoundError: If file doesn't exist at self.catalog_path.
+            FileNotFoundError: If file doesn't exist.
             ValueError: If JSON is invalid or entries missing required fields.
         """
-        import os
-
         if not os.path.exists(self.catalog_path):
             raise FileNotFoundError(
                 f"Catalog file not found: {self.catalog_path}. "
@@ -122,85 +106,132 @@ class Retriever:
             with open(self.catalog_path, "r", encoding="utf-8") as f:
                 catalog = json.load(f)
         except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Invalid JSON in catalog file {self.catalog_path}: {e}"
-            ) from e
+            raise ValueError(f"Invalid JSON in catalog file: {e}") from e
 
-        if not isinstance(catalog, list):
-            raise ValueError(
-                f"Catalog must be a JSON array, got {type(catalog).__name__}"
-            )
-
-        if len(catalog) == 0:
-            raise ValueError("Catalog is empty — no entries to index.")
+        if not isinstance(catalog, list) or len(catalog) == 0:
+            raise ValueError("Catalog must be a non-empty JSON array.")
 
         # Validate required fields
-        required_fields = ["name", "url", "test_type"]
         for i, entry in enumerate(catalog):
-            for field in required_fields:
+            for field in ["name", "url", "test_type"]:
                 if field not in entry or not entry[field]:
-                    raise ValueError(
-                        f"Catalog entry {i} missing required field '{field}': "
-                        f"{entry.get('name', 'UNKNOWN')}"
-                    )
+                    raise ValueError(f"Catalog entry {i} missing '{field}'")
 
         return catalog
 
-    def _entry_to_text(self, entry: dict) -> str:
+    def _load_embeddings(self) -> np.ndarray:
         """
-        Convert a catalog entry to a text string for embedding.
-
-        Format: "{name} | {test_type} | {description}"
-        This gives the embedding model context about the assessment's name,
-        type, and what it measures.
-
-        Args:
-            entry: A catalog entry dict.
+        Load pre-computed embeddings from .npy file.
 
         Returns:
-            Formatted text string for embedding.
-        """
-        name = entry.get("name", "")
-        test_type = entry.get("test_type", "")
-        description = entry.get("description", "")
+            numpy array of shape (N, 384) with L2-normalized embeddings.
 
-        # Combine fields with pipe separator for clear semantic boundaries
-        return f"{name} | {test_type} | {description}"
+        Raises:
+            FileNotFoundError: If embeddings file doesn't exist.
+            ValueError: If file is corrupted or wrong dimensions.
+        """
+        if not os.path.exists(self.embeddings_path):
+            raise FileNotFoundError(
+                f"Embeddings file not found: {self.embeddings_path}. "
+                f"Run 'python scripts/precompute_embeddings.py' first."
+            )
+
+        try:
+            embeddings = np.load(self.embeddings_path)
+        except Exception as e:
+            raise ValueError(f"Failed to load embeddings: {e}") from e
+
+        if embeddings.ndim != 2 or embeddings.shape[1] != config.EMBEDDING_DIM:
+            raise ValueError(
+                f"Embeddings have wrong shape: {embeddings.shape}. "
+                f"Expected (N, {config.EMBEDDING_DIM})."
+            )
+
+        return embeddings.astype(np.float32)
+
+    def _embed_query(self, query: str) -> np.ndarray:
+        """
+        Embed a query string using Hugging Face Inference API.
+
+        Calls the same model (all-MiniLM-L6-v2) that was used to pre-compute
+        catalog embeddings, ensuring vectors are in the same space.
+
+        Args:
+            query: Natural language search string.
+
+        Returns:
+            numpy array of shape (1, 384) — L2-normalized query embedding.
+
+        Raises:
+            RuntimeError: If HF API call fails.
+        """
+        if not config.HF_API_TOKEN:
+            raise RuntimeError("HF_API_TOKEN not set. Add it to .env file.")
+
+        headers = {"Authorization": f"Bearer {config.HF_API_TOKEN}"}
+        payload = {"inputs": query, "options": {"wait_for_model": True}}
+
+        try:
+            response = requests.post(
+                config.HF_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            response.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise RuntimeError("HF Inference API timed out (10s)")
+        except requests.exceptions.HTTPError as e:
+            raise RuntimeError(f"HF Inference API error: {e.response.status_code} {e.response.text[:200]}")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"HF Inference API request failed: {e}")
+
+        # Parse response — returns a list of floats (384 dimensions)
+        embedding = response.json()
+
+        # Handle nested list format [[0.1, 0.2, ...]]
+        if isinstance(embedding, list) and len(embedding) > 0:
+            if isinstance(embedding[0], list):
+                embedding = embedding[0]
+
+        embedding = np.array(embedding, dtype=np.float32).reshape(1, -1)
+
+        # L2 normalize for cosine similarity
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+
+        return embedding
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
         """
         Search the catalog for entries most similar to the query.
 
         Args:
-            query: Natural language search string (e.g., "java developer cognitive test").
+            query: Natural language search string.
             top_k: Number of results to return (1-10, default 10).
 
         Returns:
-            List of catalog entry dicts, ordered by descending cosine similarity.
-            Each dict includes all catalog fields plus a 'score' field (0.0-1.0).
-
-        Notes:
-            - Returns at most top_k results (may be fewer if catalog is smaller).
-            - Empty query returns top_k entries by arbitrary order (not recommended).
-            - Score is cosine similarity (1.0 = identical, 0.0 = orthogonal).
+            List of catalog entry dicts ordered by descending cosine similarity.
+            Each dict includes all catalog fields plus a 'score' field.
         """
-        # Clamp top_k to valid range
         top_k = max(1, min(top_k, config.MAX_RECOMMENDATIONS, len(self.catalog)))
 
-        # Embed the query (normalized for cosine similarity)
-        query_embedding = self.model.encode(
-            [query], show_progress_bar=False, normalize_embeddings=True
-        )
-        query_vector = np.array(query_embedding, dtype=np.float32)
+        try:
+            query_vector = self._embed_query(query)
+        except RuntimeError as e:
+            # If HF API fails, return empty results (agent will handle gracefully)
+            print(f"  WARNING: Query embedding failed: {e}")
+            return []
 
         # Search FAISS index
         scores, indices = self.index.search(query_vector, top_k)
 
-        # Build results list with scores
+        # Build results list
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(self.catalog):
-                continue  # FAISS returns -1 for missing results
+                continue
             entry = self.catalog[idx].copy()
             entry["score"] = float(score)
             results.append(entry)
@@ -213,9 +244,6 @@ class Retriever:
 
         Returns:
             List of all catalog entry dicts (without scores).
-
-        Notes:
-            Used by agent.py to validate that recommendations exist in the catalog.
         """
         return self.catalog
 
@@ -223,8 +251,6 @@ class Retriever:
 # ============================================================
 # Module-level instance — initialized once at startup
 # ============================================================
-# This will be set by main.py during startup event.
-# Other modules import this and use it for search.
 _instance: Optional[Retriever] = None
 
 
@@ -232,31 +258,25 @@ def get_retriever() -> Retriever:
     """
     Get the global Retriever instance.
 
-    Returns:
-        The initialized Retriever instance.
-
     Raises:
         RuntimeError: If retriever hasn't been initialized yet.
     """
     if _instance is None:
-        raise RuntimeError(
-            "Retriever not initialized. Call initialize_retriever() first."
-        )
+        raise RuntimeError("Retriever not initialized. Call initialize_retriever() first.")
     return _instance
 
 
-def initialize_retriever(catalog_path: Optional[str] = None) -> Retriever:
+def initialize_retriever(catalog_path: Optional[str] = None, embeddings_path: Optional[str] = None) -> Retriever:
     """
-    Initialize the global Retriever instance.
-
-    Called once during FastAPI startup event.
+    Initialize the global Retriever instance. Called once during FastAPI startup.
 
     Args:
         catalog_path: Optional override for catalog file path.
+        embeddings_path: Optional override for embeddings file path.
 
     Returns:
         The initialized Retriever instance.
     """
     global _instance
-    _instance = Retriever(catalog_path=catalog_path)
+    _instance = Retriever(catalog_path=catalog_path, embeddings_path=embeddings_path)
     return _instance

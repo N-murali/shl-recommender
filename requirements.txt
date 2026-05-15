@@ -1,8 +1,9 @@
 # ============================================================
-# SHL Assessment Recommender — Pinned Dependencies
+# SHL Assessment Recommender — Pinned Dependencies (PRODUCTION)
 # ============================================================
-# Versions are pinned for reproducibility on Render deployment.
-# The auto-evaluator needs identical behavior every run.
+# Optimized for Render free tier (512MB RAM).
+# sentence-transformers and PyTorch REMOVED — embeddings pre-computed
+# offline and queries embedded via Hugging Face Inference API.
 # ============================================================
 
 # Runtime: FastAPI + Uvicorn (ASGI server)
@@ -13,29 +14,29 @@ uvicorn==0.47.0
 pydantic==2.13.4
 
 # LLM Provider: Groq (llama-3.3-70b-versatile)
-# To swap to Anthropic: remove groq, add anthropic==0.25.0
-groq==0.12.0
+groq==1.2.0
 
-# Embeddings: sentence-transformers (all-MiniLM-L6-v2)
-sentence-transformers==3.3.1
-
-# Vector Store: FAISS (CPU version for Render free tier)
-faiss-cpu==1.9.0.post1
+# Vector Store: FAISS (CPU version)
+faiss-cpu==1.13.2
 
 # Environment variable management
 python-dotenv==1.2.2
 
-# Numerical operations (required by FAISS and sentence-transformers)
+# Numerical operations (load pre-computed embeddings)
 numpy==2.2.6
 
-# Scraper: HTTP requests + HTML parsing
+# HTTP requests (HF Inference API for query embeddings + scraper)
 requests==2.34.1
+
+# HTML parsing (scraper only, not needed at runtime but included)
 beautifulsoup4==4.14.3
 
 # ============================================================
-# Development / Testing (not needed on Render, but included
-# so `pip install -r requirements.txt` sets up everything)
+# NOT included on server (saves ~400MB RAM):
+# sentence-transformers — embeddings pre-computed offline
+# torch — required by sentence-transformers, not needed at runtime
+#
+# To pre-compute embeddings locally, install separately:
+#   pip install sentence-transformers
+#   python scripts/precompute_embeddings.py
 # ============================================================
-pytest==8.3.5
-pytest-asyncio==0.25.3
-httpx==0.28.1
